@@ -1,0 +1,744 @@
+From 3070a4a30a7dbde78375cd21058f925cbd78b48d Mon Sep 17 00:00:00 2001
+From: Umair Ashraf <umr.ashrf@gmail.com>
+Date: Wed, 18 Mar 2015 15:30:42 +0500
+Subject: [PATCH 2/5] made selectors independent of scrapy
+
+---
+ selectors/__init__.py        |  10 +-
+ selectors/common.py          |  22 ++++
+ selectors/csstranslator.py   |  16 +--
+ selectors/exceptions.py      |   5 +
+ selectors/lxmldocument.py    |  31 ------
+ selectors/lxmlsel.py         |  50 ---------
+ selectors/unified.py         |  63 +++--------
+ selectors/utils/decorator.py |  23 +---
+ selectors/utils/misc.py      |  86 +--------------
+ selectors/utils/python.py    | 249 -------------------------------------------
+ 10 files changed, 57 insertions(+), 498 deletions(-)
+ create mode 100644 selectors/common.py
+ create mode 100644 selectors/exceptions.py
+ delete mode 100644 selectors/lxmldocument.py
+ delete mode 100644 selectors/lxmlsel.py
+
+diff --git a/selectors/__init__.py b/selectors/__init__.py
+index bfbde4d..97eb9d5 100644
+--- a/selectors/__init__.py
++++ b/selectors/__init__.py
+@@ -1,5 +1,5 @@
+-"""
+-Selectors
+-"""
+-from scrapy.selector.unified import *
+-from scrapy.selector.lxmlsel import *
++
++__version__ = '0.0.1'
++
++
++from selectors.unified import *
+diff --git a/selectors/common.py b/selectors/common.py
+new file mode 100644
+index 0000000..4cbf1ec
+--- /dev/null
++++ b/selectors/common.py
+@@ -0,0 +1,22 @@
++"""
++We need these things in Scrapy and Selectors packages both
++"""
++from lxml import etree
++
++from .csstranslator import SelectorHTMLTranslator, SelectorGenericTranslator
++
++
++class SafeXMLParser(etree.XMLParser):
++    def __init__(self, *args, **kwargs):
++        kwargs.setdefault('resolve_entities', False)
++        super(SafeXMLParser, self).__init__(*args, **kwargs)
++
++
++_ctgroup = {
++    'html': {'_parser': etree.HTMLParser,
++             '_csstranslator': SelectorHTMLTranslator(),
++             '_tostring_method': 'html'},
++    'xml': {'_parser': SafeXMLParser,
++            '_csstranslator': SelectorGenericTranslator(),
++            '_tostring_method': 'xml'},
++}
+diff --git a/selectors/csstranslator.py b/selectors/csstranslator.py
+index 7482837..2148a10 100644
+--- a/selectors/csstranslator.py
++++ b/selectors/csstranslator.py
+@@ -3,7 +3,7 @@ from cssselect.xpath import _unicode_safe_getattr, XPathExpr, ExpressionError
+ from cssselect.parser import FunctionalPseudoElement
+ 
+ 
+-class ScrapyXPathExpr(XPathExpr):
++class SelectorXPathExpr(XPathExpr):
+ 
+     textnode = False
+     attribute = None
+@@ -16,7 +16,7 @@ class ScrapyXPathExpr(XPathExpr):
+         return x
+ 
+     def __str__(self):
+-        path = super(ScrapyXPathExpr, self).__str__()
++        path = super(SelectorXPathExpr, self).__str__()
+         if self.textnode:
+             if path == '*':
+                 path = 'text()'
+@@ -33,7 +33,7 @@ class ScrapyXPathExpr(XPathExpr):
+         return path
+ 
+     def join(self, combiner, other):
+-        super(ScrapyXPathExpr, self).join(combiner, other)
++        super(SelectorXPathExpr, self).join(combiner, other)
+         self.textnode = other.textnode
+         self.attribute = other.attribute
+         return self
+@@ -43,7 +43,7 @@ class TranslatorMixin(object):
+ 
+     def xpath_element(self, selector):
+         xpath = super(TranslatorMixin, self).xpath_element(selector)
+-        return ScrapyXPathExpr.from_xpath(xpath)
++        return SelectorXPathExpr.from_xpath(xpath)
+ 
+     def xpath_pseudo_element(self, xpath, pseudo_element):
+         if isinstance(pseudo_element, FunctionalPseudoElement):
+@@ -71,18 +71,18 @@ class TranslatorMixin(object):
+             raise ExpressionError(
+                 "Expected a single string or ident for ::attr(), got %r"
+                 % function.arguments)
+-        return ScrapyXPathExpr.from_xpath(xpath,
++        return SelectorXPathExpr.from_xpath(xpath,
+             attribute=function.arguments[0].value)
+ 
+     def xpath_text_simple_pseudo_element(self, xpath):
+         """Support selecting text nodes using ::text pseudo-element"""
+-        return ScrapyXPathExpr.from_xpath(xpath, textnode=True)
++        return SelectorXPathExpr.from_xpath(xpath, textnode=True)
+ 
+ 
+-class ScrapyGenericTranslator(TranslatorMixin, GenericTranslator):
++class SelectorGenericTranslator(TranslatorMixin, GenericTranslator):
+     pass
+ 
+ 
+-class ScrapyHTMLTranslator(TranslatorMixin, HTMLTranslator):
++class SelectorHTMLTranslator(TranslatorMixin, HTMLTranslator):
+     pass
+ 
+diff --git a/selectors/exceptions.py b/selectors/exceptions.py
+new file mode 100644
+index 0000000..9ed8b6b
+--- /dev/null
++++ b/selectors/exceptions.py
+@@ -0,0 +1,5 @@
++class SelectorsDeprecationWarning(Warning):
++    """Warning category for deprecated features, since the default
++    DeprecationWarning is silenced on Python 2.7+
++    """
++    pass
+diff --git a/selectors/lxmldocument.py b/selectors/lxmldocument.py
+deleted file mode 100644
+index 817349b..0000000
+--- a/selectors/lxmldocument.py
++++ /dev/null
+@@ -1,31 +0,0 @@
+-"""
+-This module contains a simple class (LxmlDocument) which provides cache and
+-garbage collection to lxml element tree documents.
+-"""
+-
+-import weakref
+-from lxml import etree
+-from scrapy.utils.trackref import object_ref
+-
+-
+-def _factory(response, parser_cls):
+-    url = response.url
+-    body = response.body_as_unicode().strip().encode('utf8') or '<html/>'
+-    parser = parser_cls(recover=True, encoding='utf8')
+-    return etree.fromstring(body, parser=parser, base_url=url)
+-
+-
+-class LxmlDocument(object_ref):
+-
+-    cache = weakref.WeakKeyDictionary()
+-    __slots__ = ['__weakref__']
+-
+-    def __new__(cls, response, parser=etree.HTMLParser):
+-        cache = cls.cache.setdefault(response, {})
+-        if parser not in cache:
+-            obj = object_ref.__new__(cls)
+-            cache[parser] = _factory(response, parser)
+-        return cache[parser]
+-
+-    def __str__(self):
+-        return "<LxmlDocument %s>" % self.root.tag
+diff --git a/selectors/lxmlsel.py b/selectors/lxmlsel.py
+deleted file mode 100644
+index 070cb23..0000000
+--- a/selectors/lxmlsel.py
++++ /dev/null
+@@ -1,50 +0,0 @@
+-"""
+-XPath selectors based on lxml
+-"""
+-from scrapy.utils.deprecate import create_deprecated_class
+-from .unified import Selector, SelectorList
+-
+-
+-__all__ = ['HtmlXPathSelector', 'XmlXPathSelector', 'XPathSelector',
+-           'XPathSelectorList']
+-
+-def _xpathselector_css(self, *a, **kw):
+-    raise RuntimeError('.css() method not available for %s, '
+-                        'instantiate scrapy.Selector '
+-                        'instead' % type(self).__name__)
+-
+-XPathSelector = create_deprecated_class(
+-    'XPathSelector',
+-    Selector,
+-    {
+-        '__slots__': (),
+-        '_default_type': 'html',
+-        'css': _xpathselector_css,
+-    },
+-    new_class_path='scrapy.Selector',
+-    old_class_path='scrapy.selector.XPathSelector',
+-)
+-
+-XmlXPathSelector = create_deprecated_class(
+-    'XmlXPathSelector',
+-    XPathSelector,
+-    clsdict={
+-        '__slots__': (),
+-        '_default_type': 'xml',
+-    },
+-    new_class_path='scrapy.Selector',
+-    old_class_path='scrapy.selector.XmlXPathSelector',
+-)
+-
+-HtmlXPathSelector = create_deprecated_class(
+-    'HtmlXPathSelector',
+-    XPathSelector,
+-    clsdict={
+-        '__slots__': (),
+-        '_default_type': 'html',
+-    },
+-    new_class_path='scrapy.Selector',
+-    old_class_path='scrapy.selector.HtmlXPathSelector',
+-)
+-
+-XPathSelectorList = create_deprecated_class('XPathSelectorList', SelectorList)
+diff --git a/selectors/unified.py b/selectors/unified.py
+index b8a3678..1d3c4ee 100644
+--- a/selectors/unified.py
++++ b/selectors/unified.py
+@@ -1,57 +1,22 @@
+ """
+ XPath selectors based on lxml
+ """
+-
+ from lxml import etree
+ 
+-from scrapy.utils.misc import extract_regex
+-from scrapy.utils.trackref import object_ref
+-from scrapy.utils.python import unicode_to_str, flatten
+-from scrapy.utils.decorator import deprecated
+-from scrapy.http import HtmlResponse, XmlResponse
+-from .lxmldocument import LxmlDocument
+-from .csstranslator import ScrapyHTMLTranslator, ScrapyGenericTranslator
++from .utils.misc import extract_regex
++from .utils.python import flatten
++from .utils.decorator import deprecated
++from .common import _ctgroup
+ 
+ 
+ __all__ = ['Selector', 'SelectorList']
+ 
+ 
+-class SafeXMLParser(etree.XMLParser):
+-    def __init__(self, *args, **kwargs):
+-        kwargs.setdefault('resolve_entities', False)
+-        super(SafeXMLParser, self).__init__(*args, **kwargs)
+-
+-_ctgroup = {
+-    'html': {'_parser': etree.HTMLParser,
+-             '_csstranslator': ScrapyHTMLTranslator(),
+-             '_tostring_method': 'html'},
+-    'xml': {'_parser': SafeXMLParser,
+-            '_csstranslator': ScrapyGenericTranslator(),
+-            '_tostring_method': 'xml'},
+-}
+-
+-
+-def _st(response, st):
+-    if st is None:
+-        return 'xml' if isinstance(response, XmlResponse) else 'html'
+-    elif st in ('xml', 'html'):
+-        return st
+-    else:
+-        raise ValueError('Invalid type: %s' % st)
+-
++class Selector(object):
+ 
+-def _response_from_text(text, st):
+-    rt = XmlResponse if st == 'xml' else HtmlResponse
+-    return rt(url='about:blank', encoding='utf-8',
+-              body=unicode_to_str(text, 'utf-8'))
++    __slots__ = ['text', 'namespaces', 'type', '_expr', '_root',
++                 '_parser', '_csstranslator', '_tostring_method']
+ 
+-
+-class Selector(object_ref):
+-
+-    __slots__ = ['response', 'text', 'namespaces', 'type', '_expr', '_root',
+-                 '__weakref__', '_parser', '_csstranslator', '_tostring_method']
+-
+-    _default_type = None
+     _default_namespaces = {
+         "re": "http://exslt.org/regular-expressions",
+ 
+@@ -65,23 +30,23 @@ class Selector(object_ref):
+     }
+     _lxml_smart_strings = False
+ 
+-    def __init__(self, response=None, text=None, type=None, namespaces=None,
++    def __init__(self, text=None, url=None, type='html', namespaces=None,
+                  _root=None, _expr=None):
+-        self.type = st = _st(response, type or self._default_type)
++        self.type = st = type
+         self._parser = _ctgroup[st]['_parser']
+         self._csstranslator = _ctgroup[st]['_csstranslator']
+         self._tostring_method = _ctgroup[st]['_tostring_method']
+ 
++        self.text = text
+         if text is not None:
+-            response = _response_from_text(text, st)
++            body = text.strip().encode('utf8') or '<html/>'
++            parser_obj = self._parser(recover=True, encoding='utf8')
++            _root = etree.fromstring(body, base_url=url, parser=parser_obj)
+ 
+-        if response is not None:
+-            _root = LxmlDocument(response, self._parser)
+-
+-        self.response = response
+         self.namespaces = dict(self._default_namespaces)
+         if namespaces is not None:
+             self.namespaces.update(namespaces)
++
+         self._root = _root
+         self._expr = _expr
+ 
+diff --git a/selectors/utils/decorator.py b/selectors/utils/decorator.py
+index 38bee1a..2177a9a 100644
+--- a/selectors/utils/decorator.py
++++ b/selectors/utils/decorator.py
+@@ -1,9 +1,7 @@
+ import warnings
+ from functools import wraps
+ 
+-from twisted.internet import defer, threads
+-
+-from scrapy.exceptions import ScrapyDeprecationWarning
++from selectors.exceptions import SelectorsDeprecationWarning
+ 
+ 
+ def deprecated(use_instead=None):
+@@ -17,7 +15,7 @@ def deprecated(use_instead=None):
+             message = "Call to deprecated function %s." % func.__name__
+             if use_instead:
+                 message += " Use %s instead." % use_instead
+-            warnings.warn(message, category=ScrapyDeprecationWarning, stacklevel=2)
++            warnings.warn(message, category=SelectorsDeprecationWarning, stacklevel=2)
+             return func(*args, **kwargs)
+         return wrapped
+ 
+@@ -25,20 +23,3 @@ def deprecated(use_instead=None):
+         deco = deco(use_instead)
+         use_instead = None
+     return deco
+-
+-
+-def defers(func):
+-    """Decorator to make sure a function always returns a deferred"""
+-    @wraps(func)
+-    def wrapped(*a, **kw):
+-        return defer.maybeDeferred(func, *a, **kw)
+-    return wrapped
+-
+-def inthread(func):
+-    """Decorator to call a function in a thread and return a deferred with the
+-    result
+-    """
+-    @wraps(func)
+-    def wrapped(*a, **kw):
+-        return threads.deferToThread(func, *a, **kw)
+-    return wrapped
+diff --git a/selectors/utils/misc.py b/selectors/utils/misc.py
+index 3152db6..969e78e 100644
+--- a/selectors/utils/misc.py
++++ b/selectors/utils/misc.py
+@@ -1,76 +1,9 @@
+ """Helper functions which doesn't fit anywhere else"""
+ import re
+-import hashlib
+-from importlib import import_module
+-from pkgutil import iter_modules
+ 
+-import six
+ from w3lib.html import replace_entities
+ 
+-from scrapy.utils.python import flatten
+-from scrapy.item import BaseItem
+-
+-
+-_ITERABLE_SINGLE_VALUES = dict, BaseItem, six.text_type, bytes
+-
+-
+-def arg_to_iter(arg):
+-    """Convert an argument to an iterable. The argument can be a None, single
+-    value, or an iterable.
+-
+-    Exception: if arg is a dict, [arg] will be returned
+-    """
+-    if arg is None:
+-        return []
+-    elif not isinstance(arg, _ITERABLE_SINGLE_VALUES) and hasattr(arg, '__iter__'):
+-        return arg
+-    else:
+-        return [arg]
+-
+-
+-def load_object(path):
+-    """Load an object given its absolute object path, and return it.
+-
+-    object can be a class, function, variable o instance.
+-    path ie: 'scrapy.contrib.downloadermiddelware.redirect.RedirectMiddleware'
+-    """
+-
+-    try:
+-        dot = path.rindex('.')
+-    except ValueError:
+-        raise ValueError("Error loading object '%s': not a full path" % path)
+-
+-    module, name = path[:dot], path[dot+1:]
+-    mod = import_module(module)
+-
+-    try:
+-        obj = getattr(mod, name)
+-    except AttributeError:
+-        raise NameError("Module '%s' doesn't define any object named '%s'" % (module, name))
+-
+-    return obj
+-
+-
+-def walk_modules(path):
+-    """Loads a module and all its submodules from a the given module path and
+-    returns them. If *any* module throws an exception while importing, that
+-    exception is thrown back.
+-
+-    For example: walk_modules('scrapy.utils')
+-    """
+-
+-    mods = []
+-    mod = import_module(path)
+-    mods.append(mod)
+-    if hasattr(mod, '__path__'):
+-        for _, subpath, ispkg in iter_modules(mod.__path__):
+-            fullpath = path + '.' + subpath
+-            if ispkg:
+-                mods += walk_modules(fullpath)
+-            else:
+-                submod = import_module(fullpath)
+-                mods.append(submod)
+-    return mods
++from .python import flatten
+ 
+ 
+ def extract_regex(regex, text, encoding='utf-8'):
+@@ -94,20 +27,3 @@ def extract_regex(regex, text, encoding='utf-8'):
+         return [replace_entities(s, keep=['lt', 'amp']) for s in strings]
+     else:
+         return [replace_entities(unicode(s, encoding), keep=['lt', 'amp']) for s in strings]
+-
+-
+-def md5sum(file):
+-    """Calculate the md5 checksum of a file-like object without reading its
+-    whole content in memory.
+-
+-    >>> from io import BytesIO
+-    >>> md5sum(BytesIO(b'file content to hash'))
+-    '784406af91dd5a54fbb9c84c2236595a'
+-    """
+-    m = hashlib.md5()
+-    while 1:
+-        d = file.read(8096)
+-        if not d:
+-            break
+-        m.update(d)
+-    return m.hexdigest()
+diff --git a/selectors/utils/python.py b/selectors/utils/python.py
+index 551d337..beb62f0 100644
+--- a/selectors/utils/python.py
++++ b/selectors/utils/python.py
+@@ -1,19 +1,3 @@
+-"""
+-This module contains essential stuff that should've come with Python itself ;)
+-
+-It also contains functions (or functionality) which is in Python versions
+-higher than 2.5 which used to be the lowest version supported by Scrapy.
+-
+-"""
+-import os
+-import re
+-import inspect
+-import weakref
+-import errno
+-import six
+-from functools import partial, wraps
+-
+-
+ def flatten(x):
+     """flatten(sequence) -> list
+ 
+@@ -34,236 +18,3 @@ def flatten(x):
+         else:
+             result.append(el)
+     return result
+-
+-
+-def unique(list_, key=lambda x: x):
+-    """efficient function to uniquify a list preserving item order"""
+-    seen = set()
+-    result = []
+-    for item in list_:
+-        seenkey = key(item)
+-        if seenkey in seen:
+-            continue
+-        seen.add(seenkey)
+-        result.append(item)
+-    return result
+-
+-
+-def str_to_unicode(text, encoding=None, errors='strict'):
+-    """Return the unicode representation of text in the given encoding. Unlike
+-    .encode(encoding) this function can be applied directly to a unicode
+-    object without the risk of double-decoding problems (which can happen if
+-    you don't use the default 'ascii' encoding)
+-    """
+-
+-    if encoding is None:
+-        encoding = 'utf-8'
+-    if isinstance(text, str):
+-        return text.decode(encoding, errors)
+-    elif isinstance(text, unicode):
+-        return text
+-    else:
+-        raise TypeError('str_to_unicode must receive a str or unicode object, got %s' % type(text).__name__)
+-
+-def unicode_to_str(text, encoding=None, errors='strict'):
+-    """Return the str representation of text in the given encoding. Unlike
+-    .encode(encoding) this function can be applied directly to a str
+-    object without the risk of double-decoding problems (which can happen if
+-    you don't use the default 'ascii' encoding)
+-    """
+-
+-    if encoding is None:
+-        encoding = 'utf-8'
+-    if isinstance(text, unicode):
+-        return text.encode(encoding, errors)
+-    elif isinstance(text, str):
+-        return text
+-    else:
+-        raise TypeError('unicode_to_str must receive a unicode or str object, got %s' % type(text).__name__)
+-
+-def re_rsearch(pattern, text, chunk_size=1024):
+-    """
+-    This function does a reverse search in a text using a regular expression
+-    given in the attribute 'pattern'.
+-    Since the re module does not provide this functionality, we have to find for
+-    the expression into chunks of text extracted from the end (for the sake of efficiency).
+-    At first, a chunk of 'chunk_size' kilobytes is extracted from the end, and searched for
+-    the pattern. If the pattern is not found, another chunk is extracted, and another
+-    search is performed.
+-    This process continues until a match is found, or until the whole file is read.
+-    In case the pattern wasn't found, None is returned, otherwise it returns a tuple containing
+-    the start position of the match, and the ending (regarding the entire text).
+-    """
+-    def _chunk_iter():
+-        offset = len(text)
+-        while True:
+-            offset -= (chunk_size * 1024)
+-            if offset <= 0:
+-                break
+-            yield (text[offset:], offset)
+-        yield (text, 0)
+-
+-    pattern = re.compile(pattern) if isinstance(pattern, basestring) else pattern
+-    for chunk, offset in _chunk_iter():
+-        matches = [match for match in pattern.finditer(chunk)]
+-        if matches:
+-            return (offset + matches[-1].span()[0], offset + matches[-1].span()[1])
+-    return None
+-
+-def memoizemethod_noargs(method):
+-    """Decorator to cache the result of a method (without arguments) using a
+-    weak reference to its object
+-    """
+-    cache = weakref.WeakKeyDictionary()
+-    @wraps(method)
+-    def new_method(self, *args, **kwargs):
+-        if self not in cache:
+-            cache[self] = method(self, *args, **kwargs)
+-        return cache[self]
+-    return new_method
+-
+-_BINARYCHARS = set(map(chr, range(32))) - set(["\0", "\t", "\n", "\r"])
+-
+-def isbinarytext(text):
+-    """Return True if the given text is considered binary, or false
+-    otherwise, by looking for binary bytes at their chars
+-    """
+-    assert isinstance(text, str), "text must be str, got '%s'" % type(text).__name__
+-    return any(c in _BINARYCHARS for c in text)
+-
+-def get_func_args(func, stripself=False):
+-    """Return the argument name list of a callable"""
+-    if inspect.isfunction(func):
+-        func_args, _, _, _ = inspect.getargspec(func)
+-    elif inspect.isclass(func):
+-        return get_func_args(func.__init__, True)
+-    elif inspect.ismethod(func):
+-        return get_func_args(func.__func__, True)
+-    elif inspect.ismethoddescriptor(func):
+-        return []
+-    elif isinstance(func, partial):
+-        return [x for x in get_func_args(func.func)[len(func.args):]
+-                if not (func.keywords and x in func.keywords)]
+-    elif hasattr(func, '__call__'):
+-        if inspect.isroutine(func):
+-            return []
+-        elif getattr(func, '__name__', None) == '__call__':
+-            return []
+-        else:
+-            return get_func_args(func.__call__, True)
+-    else:
+-        raise TypeError('%s is not callable' % type(func))
+-    if stripself:
+-        func_args.pop(0)
+-    return func_args
+-
+-def get_spec(func):
+-    """Returns (args, kwargs) tuple for a function
+-    >>> import re
+-    >>> get_spec(re.match)
+-    (['pattern', 'string'], {'flags': 0})
+-
+-    >>> class Test(object):
+-    ...     def __call__(self, val):
+-    ...         pass
+-    ...     def method(self, val, flags=0):
+-    ...         pass
+-
+-    >>> get_spec(Test)
+-    (['self', 'val'], {})
+-
+-    >>> get_spec(Test.method)
+-    (['self', 'val'], {'flags': 0})
+-
+-    >>> get_spec(Test().method)
+-    (['self', 'val'], {'flags': 0})
+-    """
+-
+-    if inspect.isfunction(func) or inspect.ismethod(func):
+-        spec = inspect.getargspec(func)
+-    elif hasattr(func, '__call__'):
+-        spec = inspect.getargspec(func.__call__)
+-    else:
+-        raise TypeError('%s is not callable' % type(func))
+-
+-    defaults = spec.defaults or []
+-
+-    firstdefault = len(spec.args) - len(defaults)
+-    args = spec.args[:firstdefault]
+-    kwargs = dict(zip(spec.args[firstdefault:], defaults))
+-    return args, kwargs
+-
+-def equal_attributes(obj1, obj2, attributes):
+-    """Compare two objects attributes"""
+-    # not attributes given return False by default
+-    if not attributes:
+-        return False
+-
+-    for attr in attributes:
+-        # support callables like itemgetter
+-        if callable(attr):
+-            if not attr(obj1) == attr(obj2):
+-                return False
+-        else:
+-            # check that objects has attribute
+-            if not hasattr(obj1, attr):
+-                return False
+-            if not hasattr(obj2, attr):
+-                return False
+-            # compare object attributes
+-            if not getattr(obj1, attr) == getattr(obj2, attr):
+-                return False
+-    # all attributes equal
+-    return True
+-
+-
+-class WeakKeyCache(object):
+-
+-    def __init__(self, default_factory):
+-        self.default_factory = default_factory
+-        self._weakdict = weakref.WeakKeyDictionary()
+-
+-    def __getitem__(self, key):
+-        if key not in self._weakdict:
+-            self._weakdict[key] = self.default_factory(key)
+-        return self._weakdict[key]
+-
+-
+-def stringify_dict(dct_or_tuples, encoding='utf-8', keys_only=True):
+-    """Return a (new) dict with the unicode keys (and values if, keys_only is
+-    False) of the given dict converted to strings. `dct_or_tuples` can be a
+-    dict or a list of tuples, like any dict constructor supports.
+-    """
+-    d = {}
+-    for k, v in six.iteritems(dict(dct_or_tuples)):
+-        k = k.encode(encoding) if isinstance(k, unicode) else k
+-        if not keys_only:
+-            v = v.encode(encoding) if isinstance(v, unicode) else v
+-        d[k] = v
+-    return d
+-
+-def is_writable(path):
+-    """Return True if the given path can be written (if it exists) or created
+-    (if it doesn't exist)
+-    """
+-    if os.path.exists(path):
+-        return os.access(path, os.W_OK)
+-    else:
+-        return os.access(os.path.dirname(path), os.W_OK)
+-
+-def setattr_default(obj, name, value):
+-    """Set attribute value, but only if it's not already set. Similar to
+-    setdefault() for dicts.
+-    """
+-    if not hasattr(obj, name):
+-        setattr(obj, name, value)
+-
+-
+-def retry_on_eintr(function, *args, **kw):
+-    """Run a function and retry it while getting EINTR errors"""
+-    while True:
+-        try:
+-            return function(*args, **kw)
+-        except IOError as e:
+-            if e.errno != errno.EINTR:
+-                raise
+-- 
+1.9.1
+
