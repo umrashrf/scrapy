@@ -10,6 +10,7 @@ git filter-branch -f --prune-empty \
     --subdirectory-filter scrapy/selector -- selector-code
 # mv files to selectors/ dir without new commit
 git filter-branch -f \
+    --prune-empty \
     --index-filter '
         git ls-files -s \
         | sed "s-\t-&selectors/-" \
@@ -38,6 +39,7 @@ git filter-branch -f \
     utils-code
 # mv files to selectors/utils/ dir without new commit
 git filter-branch -f \
+    --prune-empty \
     --index-filter '
         git ls-files -s \
         | sed "s-\t-&selectors/utils/-" \
@@ -65,6 +67,7 @@ git filter-branch -f \
     tests-code
 # mv files to tests/ dir without new commit
 git filter-branch -f \
+    --prune-empty \
     --index-filter '
         git ls-files -s \
         | sed "s-\t-&tests/-" \
